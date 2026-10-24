@@ -59,7 +59,7 @@ def client_script(server, username, password, monitor_pw=None, monitor_addr=""):
         a = f" address={addr}" if addr else ""
         lines += [
             "# --- akses monitoring (read-only) untuk server Pantau ---",
-            ':do { /user group add name=monitor policy=read,api } on-error={}',
+            ':do { /user group add name=monitor policy=read,api,test } on-error={}',
             f'/user add name=monitor group=monitor password="{ros_esc(monitor_pw)}"{a}',
             f"/ip service set api disabled=no{a}",
         ]

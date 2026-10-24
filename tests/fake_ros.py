@@ -11,8 +11,9 @@ def sentence(words):
 
 class FakeRouter:
     def __init__(self):
+        self.deny = False
         self.ids = itertools.count(1)
-        self.t = {"/ppp/secret": [], "/ip/firewall/nat": [], "/ppp/active": [], "/interface": [], "/ppp/profile": [{".id": "*p1", "name": "default"}]}
+        self.t = {"/ppp/secret": [], "/ip/firewall/nat": [], "/ppp/active": [], "/interface": [], "/ip/route": [{".id": "*R1", "dst-address": "0.0.0.0/0", "gateway": "192.168.101.1", "active": "true", "disabled": "false", "distance": "1"}], "/ppp/profile": [{".id": "*p1", "name": "default"}]}
         self.srv = socket.socket(); self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.srv.bind(("127.0.0.1", 0)); self.srv.listen(8); self.port = self.srv.getsockname()[1]
         threading.Thread(target=self.loop, daemon=True).start()
@@ -53,6 +54,24 @@ class FakeRouter:
 
     def handle(self, cmd, a, qs):
         if cmd == "/login": return {} if a.get("password") == "pw" else {"trap": "invalid user name or password"}
+        if self.deny and cmd in ("/ping", "/tool/traceroute"): return {"trap": "not enough permissions (9)"}
+        if cmd == "/ping":
+            if a["address"].endswith(".invalid"): return {"trap": "failure: dns name does not exist"}
+            if a["address"] == "pubgmobile.com": return {"rows": [{"status": "timeout", "sent": "3", "received": "0", "packet-loss": "100"}]}
+            n = int(a["count"]); ipa = a["address"] if a["address"][0].isdigit() else "142.250.1.1"
+            rows = [{"seq": str(i), "host": ipa, "time": f"{10+i}ms", "ttl": "57", "size": "56",
+                                          "sent": str(i + 1), "received": str(i + 1), "packet-loss": "0",
+                                          "min-rtt": "10ms", "avg-rtt": "11ms", "max-rtt": f"{10+i}ms"} for i in range(n)]
+            return {"rows": rows}
+        if cmd == "/tool/traceroute":
+            cyc = [{"address": "10.0.0.1", "loss": "0%", "sent": "1", "last": "1ms", "avg": "1ms", "best": "1ms", "worst": "2ms"},
+                   {"address": "", "loss": "100%", "sent": "1"},
+                   {"address": a["address"], "loss": "0%", "sent": "1", "last": "9ms", "avg": "9ms", "best": "9ms", "worst": "9ms"}]
+            return {"rows": cyc + cyc}
+        if cmd == "/log/print":
+            return {"rows": [{"time": "10:00:01", "topics": "system,info", "message": "login ok"},
+                             {"time": "10:00:05", "topics": "l2tp,ppp,info", "message": "budi logged in"},
+                             {"time": "10:01:00", "topics": "system,error", "message": "boom"}]}
         if cmd == "/system/identity/print": return {"rows": [{"name": "fake-router"}]}
         if cmd == "/interface/l2tp-server/server/print": return {"rows": [{"enabled": "true"}]}
         if cmd == "/system/resource/print": return {"rows": [{"version": "7.15", "board-name": "fake"}]}

@@ -19,6 +19,14 @@ DEFAULT_SETTINGS = {
     "tg_enabled": True,
     "tg_token": "",
     "tg_chat_ids": "",
+    # --- Network Latency (ping dari router ke internet) ---
+    "latency_enabled": True,
+    "latency_interval": 60,     # detik antar siklus ping
+    "latency_gateway": True,    # ikut ping default gateway router
+    "latency_targets": "Google:google.com,YouTube:youtube.com,Mobile Legends:mobilelegends.com,PUBG Mobile:pubgmobile.com,Instagram:instagram.com,Facebook:facebook.com",
+    "latency_warn": 100,        # ms: di atas ini oranye
+    "latency_bad": 200,         # ms: di atas ini merah
+    "latency_retention_days": 7,
     # --- VPN ---
     "vpn_ip_start": 10,         # rentang IP statis untuk user VPN baru (oktet terakhir)
     "vpn_ip_end": 254,
@@ -81,6 +89,12 @@ CREATE TABLE IF NOT EXISTS watched_ifaces(
   router_id INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY(router_id, name)
 );
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS latency(
+  router_id INTEGER NOT NULL, ts INTEGER NOT NULL, target TEXT NOT NULL,
+  ms REAL, loss REAL, ip TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_latency ON latency(router_id, target, ts);
+CREATE INDEX IF NOT EXISTS ix_latency_ts ON latency(ts);
 CREATE TABLE IF NOT EXISTS vpn_servers(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,

@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import db, poller, ros, telegram as tg, demo, vpn
+from . import db, poller, ros, telegram as tg, demo, vpn, diag, latency
 from .config import ADMIN_USER, ADMIN_PASSWORD, SECRET_KEY, DEMO
 from .security import enc, dec
 
@@ -20,9 +20,11 @@ async def lifespan(app):
     db.init()
     if DEMO:
         demo.seed()
+        latency.seed_demo()
     if ADMIN_PASSWORD == "admin":
         logging.warning("ADMIN_PASSWORD masih default 'admin' — segera ganti di .env!")
     poller.start()
+    latency.start()
     tg.start_bot()
     yield
 
@@ -537,3 +539,120 @@ def vpn_cleanup(sid: int, request: Request):
     n = _vpn_call(vpn.cleanup_orphans, srv)
     _audit(request, f"Pembersihan NAT yatim di {srv['name']}: {n} rule")
     return {"removed": n}
+
+
+# ------------------------------------------------------------------ diagnosa (ping / traceroute / log)
+def _diag_run(conn, fn, *a, **kw):
+    try:
+        return fn(conn, *a, **kw)
+    except diag.DiagError as e:
+        raise HTTPException(400, str(e))
+    except ros.RosError as e:
+        raise HTTPException(502, str(e))
+
+
+def _conn_router(r):
+    if r["host"].startswith("demo"):
+        raise HTTPException(400, "Mode demo: alat diagnosa tidak tersedia untuk router simulasi.")
+    return lambda timeout=15: ros.connect(r["host"], r["port"], r["use_ssl"], r["username"], dec(r["password_enc"]), timeout=timeout)
+
+
+def _conn_vpn(s):
+    return lambda timeout=15: ros.connect(s["host"], s["port"], s["use_ssl"], s["username"], dec(s["password_enc"]), timeout=timeout)
+
+
+class PingIn(BaseModel):
+    address: str
+    count: int = 4
+    size: Optional[int] = None
+
+
+class TraceIn(BaseModel):
+    address: str
+    max_hops: int = 20
+
+
+def _diag_routes(prefix, getter, label):
+    """Daftarkan 3 endpoint diagnosa untuk satu jenis target (router monitoring / server VPN)."""
+    def mk(kind):
+        def deps(tid):
+            return _conn_router(getter(tid)) if label == "router" else _conn_vpn(getter(tid))
+        return deps
+
+    @app.post(prefix + "/{tid}/diag/ping", dependencies=[Depends(auth)], name=prefix + "_ping")
+    def _ping(tid: int, b: PingIn, request: Request):
+        res = _diag_run(mk("ping")(tid), diag.ping, b.address, b.count, b.size)
+        _audit(request, f"Ping {res['address']} dari {label} #{tid}: {res['received']}/{res['sent']}")
+        return res
+
+    @app.post(prefix + "/{tid}/diag/traceroute", dependencies=[Depends(auth)], name=prefix + "_trace")
+    def _trace(tid: int, b: TraceIn, request: Request):
+        res = _diag_run(mk("trace")(tid), diag.traceroute, b.address, b.max_hops)
+        _audit(request, f"Traceroute {res['address']} dari {label} #{tid}: {len(res['hops'])} hop")
+        return res
+
+    @app.get(prefix + "/{tid}/diag/log", dependencies=[Depends(auth)], name=prefix + "_log")
+    def _log(tid: int, limit: int = 200, topic: str = "", search: str = ""):
+        return _diag_run(mk("log")(tid), diag.log, limit, topic, search)
+
+
+_diag_routes("/api/routers", _load, "router")
+_diag_routes("/api/vpn/servers", _vpn_server, "server VPN")
+
+
+# ------------------------------------------------------------------ network latency
+def _lat_view(rid, rng):
+    s = db.get_settings()
+    sec, b = _range(rng)
+    since = int(time.time()) - sec
+    tg = latency.targets_for(s)
+    rows = db.q("""SELECT target, (ts/?)*? t, AVG(ms) ms, MAX(loss) loss FROM latency
+                   WHERE router_id=? AND ts>=? GROUP BY target, t ORDER BY t""", (b, b, rid, since))
+    ser = {}
+    for r in rows:
+        ser.setdefault(r["target"], []).append(r)
+    out = []
+    for name, host in tg:
+        pts = ser.get(name, [])
+        last = db.q1("SELECT ts, ms, loss, ip FROM latency WHERE router_id=? AND target=? ORDER BY ts DESC LIMIT 1", (rid, name))
+        vals = [p["ms"] for p in pts if p["ms"] is not None]
+        fresh = bool(last) and int(time.time()) - last["ts"] < max(180, 3 * int(s["latency_interval"]))
+        out.append({"name": name, "host": "" if host == "@gateway" else host, "ip": (last or {}).get("ip", ""),
+                    "ms": last["ms"] if last and fresh else None, "loss": last["loss"] if last and fresh else None, "fresh": fresh,
+                    "ts": last["ts"] if last else None,
+                    "avg": sum(vals) / len(vals) if vals else None, "min": min(vals) if vals else None, "max": max(vals) if vals else None,
+                    "t": [p["t"] for p in pts], "v": [p["ms"] for p in pts]})
+    return {"targets": out, "bucket": b, "warn": s["latency_warn"], "bad": s["latency_bad"], "enabled": s["latency_enabled"],
+            "error": latency.get_error(rid)}
+
+
+@app.get("/api/routers/{rid}/latency", dependencies=[Depends(auth)])
+def router_latency(rid: int, range: str = "1h"):
+    _load(rid)
+    return _lat_view(rid, range)
+
+
+@app.post("/api/routers/{rid}/latency/probe", dependencies=[Depends(auth)])
+def router_latency_probe(rid: int):
+    r = _load(rid)
+    n = latency.probe_router(r)
+    return {"measured": n, "error": latency.get_error(rid)}
+
+
+@app.get("/api/latency/overview", dependencies=[Depends(auth)])
+def latency_overview():
+    s = db.get_settings()
+    tg = [n for n, _ in latency.targets_for(s)]
+    now = int(time.time())
+    rows = db.q("""SELECT l.router_id, l.target, l.ms, l.loss, l.ts FROM latency l
+                   JOIN (SELECT router_id, target, MAX(ts) m FROM latency WHERE ts>=? GROUP BY router_id, target) x
+                   ON x.router_id=l.router_id AND x.target=l.target AND x.m=l.ts""", (now - 900,))
+    cell = {}
+    for r in rows:
+        cell.setdefault(r["router_id"], {})[r["target"]] = {"ms": r["ms"], "loss": r["loss"], "ts": r["ts"]}
+    rs = db.q("""SELECT r.id, r.name, r.group_name, r.enabled, COALESCE(s.online,0) online FROM routers r
+                 LEFT JOIN router_state s ON s.router_id=r.id ORDER BY r.name""")
+    for r in rs:
+        r["cells"] = cell.get(r["id"], {})
+        r["error"] = latency.get_error(r["id"])
+    return {"targets": tg, "routers": rs, "warn": s["latency_warn"], "bad": s["latency_bad"], "enabled": s["latency_enabled"], "now": now}

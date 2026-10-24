@@ -40,12 +40,39 @@ pip install -r requirements.txt httpx
 python tests/test_vpn.py     # memakai RouterOS palsu, tanpa router sungguhan
 ```
 
+## Network Latency (ala WiFiman)
+
+Tiap router otomatis mem-ping Google, YouTube, Mobile Legends, PUBG Mobile, Instagram, Facebook, dan **gateway-nya sendiri** (default tiap 60 detik, dari router lewat API). Hasilnya:
+
+- Panel **Network Latency** di detail router: ikon, IP hasil resolve, grafik mini, dan angka ms berwarna (hijau/oranye/merah), mengikuti rentang waktu grafik
+- Halaman **Latency**: matriks semua router × semua target dalam satu layar, cocok untuk melihat lokasi mana yang internetnya bermasalah
+- Tombol **Ukur sekarang** untuk satu siklus ping seketika
+
+Target, interval, ambang warna, dan retensi diatur di **Pengaturan → Network Latency**. Format target `Nama:host` dipisah koma.
+
+> Mobile Legends dan PUBG dipantau lewat domain situs resminya (`mobilelegends.com`, `pubgmobile.com`), bukan server game, karena alamat server game berbeda per region/event. Kalau Anda tahu IP/host server yang dipakai pemain, ganti di Pengaturan supaya angkanya mewakili ping in-game.
+> Gateway yang berupa interface (PPPoE/LTE) dilewati karena tidak punya IP untuk di-ping. Butuh policy `test` pada user monitor (lihat bagian Diagnosa).
+
+## Diagnosa dari web (ping, traceroute, log)
+
+Tombol **Diagnosa** ada di halaman detail router dan di halaman VPN (untuk server VPN). Perintah dijalankan **dari router itu sendiri**, jadi hasilnya menggambarkan koneksi router, bukan server Pantau:
+
+- **Ping**: 1–10 paket, tampil per balasan + ringkasan loss dan min/avg/max
+- **Traceroute**: tabel hop dengan loss dan latency tiap hop
+- **Log router**: filter topik (system, l2tp, error, ...) dan kata kunci, terbaru di atas, 100–500 baris
+
+Ping dan traceroute butuh policy `test` pada user API. Router baru dari script client sudah otomatis benar. Untuk router lama, jalankan sekali di router:
+```
+/user group set monitor policy=read,api,test
+```
+Setiap ping/traceroute tercatat di Riwayat alert (level Info).
+
 ## 1. Siapkan tiap MikroTik (sekali per router)
 
 Buat user **read-only** dan batasi API hanya dari subnet VPN (ganti `10.8.0.0/24` dengan subnet VPN Anda):
 
 ```
-/user group add name=monitor policy=read,api
+/user group add name=monitor policy=read,api,test
 /user add name=monitor group=monitor password=GANTI_PASSWORD_KUAT address=10.8.0.0/24
 /ip service set api disabled=no address=10.8.0.0/24
 /ip service set api-ssl disabled=yes
@@ -112,4 +139,3 @@ app/static/      dashboard (Chart.js & font dibundel, jalan offline)
 ```
 Ide pengembangan: impor otomatis router dari `/ppp secret` server VPN MikroTik, SNMP untuk perangkat non-MikroTik, ringkasan harian ke Telegram.
 # webmonitoring
-# vpnmonitoring

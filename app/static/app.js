@@ -117,6 +117,7 @@ async function route() {
   try {
     if (m) { setNav('routers'); await pageDetail(+m[1]); }
     else if (h === '/routers') { setNav('routers'); await pageRouters(); }
+    else if (h === '/latency') { setNav('latency'); await pageLatency(); }
     else if (h === '/vpn') { setNav('vpn'); await pageVpn(); }
     else if (h === '/events') { setNav('events'); await pageEvents(); }
     else if (h === '/settings') { setNav('settings'); await pageSettings(); }
@@ -203,6 +204,7 @@ async function pageDetail(id) {
   <div class="row" style="justify-content:space-between;margin-bottom:12px"><div class="seg" id="rSeg">${Object.keys(RANGES).map(r => `<button data-r="${r}" class="${S.range === r ? 'on' : ''}">${r}</button>`).join('')}</div><div class="hint" id="rHint"></div></div>
   <div class="kpis" id="dK"></div>
   <section class="panel" style="margin-bottom:12px"><header><h2>Ketersediaan</h2><div class="stat-line" id="avail"></div></header><div style="height:12px"></div><div class="strip" id="strip"></div></section>
+  <section class="panel" id="latPanel" style="margin-bottom:12px"><header><h2>Network Latency</h2><div class="row"><span class="hint" id="latHint"></span><button class="btn sm" id="latNow">Ukur sekarang</button></div></header><div id="latBody" class="lat-list"><div class="empty">Memuat…</div></div></section>
   <div id="chartGrid"></div>
   <div class="sect"><h2>Interface</h2><span class="hint">Klik bintang untuk memantau interface — alert dikirim saat link down.</span></div>
   <section class="panel"><div class="tbl-wrap"><table class="tbl" id="ifTbl"></table></div></section>
@@ -248,10 +250,11 @@ async function pageDetail(id) {
     const stat = !r.enabled ? '<span class="pill">Nonaktif</span>' : on ? '<span class="pill ok"><i class="dot"></i>Online</span>' : '<span class="pill bad"><i class="dot"></i>Down</span>';
     $('#dHead').innerHTML = `<div class="page-head"><div><div class="row"><a class="btn ghost sm" href="#/">← Dashboard</a></div><div class="row" style="margin-top:6px"><h1>${esc(r.name)}</h1>${stat}</div>
       <div class="sub mono">${esc(r.host)}${r.group_name ? ' · ' + esc(r.group_name) : ''}${I.model ? ' · ' + esc(I.model) : ''}${I.version ? ' · RouterOS ' + esc(I.version) : ''}</div></div>
-      <div class="row"><button class="btn" id="pollBtn">Cek sekarang</button><button class="btn" id="editBtn">Edit</button></div></div>
+      <div class="row"><button class="btn" id="pollBtn">Cek sekarang</button><button class="btn" id="diagBtn">Diagnosa</button><button class="btn" id="editBtn">Edit</button></div></div>
       ${!on && st.last_poll ? `<div class="panel pad" style="border-color:var(--bad);margin-bottom:12px"><b style="color:var(--bad)">Router tidak merespon</b> — ${esc(st.last_error || '')}<div class="hint">Terakhir online ${ago(st.last_ok)} · gagal ${st.fail_count}x berturut-turut</div></div>` : ''}
       ${det.alerts.length ? `<div class="row" style="margin-bottom:12px">${det.alerts.map(a => `<span class="chip ${a.level === 'critical' ? 'bad' : 'warn'}">${esc(a.message)}</span>`).join('')}</div>` : ''}`;
     $('#pollBtn').onclick = async e => { e.target.disabled = true; try { await api(`/routers/${id}/poll`, { method: 'POST' }); await refresh(); } finally { e.target.disabled = false; } };
+    $('#diagBtn').onclick = () => openDiag(`/routers/${id}/diag`, r.name);
     $('#editBtn').onclick = async () => { const rr = (await api('/routers')).find(x => x.id === id); openRouterForm(rr, () => route()); };
     const kp = (l, v, s, c) => `<div class="panel kpi"><div class="l">${l}</div><div class="v" ${c ? `style="color:${c}"` : ''}>${v}</div><div class="s">${s || ''}</div></div>`;
     $('#dK').innerHTML = on ? kp('CPU', num(L.cpu) + '<small>%</small>', `${I.cpu_count || ''} core · ${esc(I.arch || '')}`) + kp('Memori', num(L.mem_pct) + '<small>%</small>', `${fmtBytes(L.mem_used)} / ${fmtBytes(L.mem_total)}`) +
@@ -290,18 +293,26 @@ async function pageDetail(id) {
     [det, M] = await Promise.all([api('/routers/' + id), api(`/routers/${id}/metrics?range=${S.range}`)]);
     wanted = new Set(det.watched);
     $('#rHint').textContent = `Resolusi ${M.bucket} detik`;
-    drawStatic(); drawCharts(); await loadIface();
+    drawStatic(); drawCharts(); await loadIface(); await loadLat();
   }
+  async function loadLat() {
+    try {
+      const j = await api(`/routers/${id}/latency?range=${S.range}`);
+      $('#latHint').textContent = j.enabled ? `grafik ${S.range}` : 'dimatikan di Pengaturan';
+      $('#latBody').innerHTML = (j.error ? `<div class="lat-err">${esc(j.error)}</div>` : '') + (j.targets.length ? latRows(j) : '<div class="empty">Belum ada target. Atur di Pengaturan → Network Latency.</div>');
+    } catch (e) { $('#latBody').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }
+  $('#latNow').onclick = async e => { e.target.disabled = true; try { const j = await api(`/routers/${id}/latency/probe`, { method: 'POST' }); if (!j.measured && !j.error) toast('Tidak ada target terukur'); await loadLat(); } catch (x) { toast(x.message, 'bad'); } finally { e.target.disabled = false; } };
   async function drawChartsAsync() { M = await api(`/routers/${id}/metrics?range=${S.range}`); $('#rHint').textContent = `Resolusi ${M.bucket} detik`; drawCharts(); await loadIface(true); }
   // rebind (range change)
-  $('#rSeg').onclick = e => { const b = e.target.closest('button'); if (!b) return; S.range = b.dataset.r; $$('#rSeg button').forEach(x => x.classList.toggle('on', x === b)); destroyCharts(); shownIds = ''; drawChartsAsync(); };
+  $('#rSeg').onclick = e => { const b = e.target.closest('button'); if (!b) return; S.range = b.dataset.r; $$('#rSeg button').forEach(x => x.classList.toggle('on', x === b)); destroyCharts(); shownIds = ''; drawChartsAsync(); loadLat(); };
   await load();
   refresh = load;
 }
 
 /* ---------- router management ---------- */
 const SETUP_CMD = `# Jalankan di terminal MikroTik (ganti subnet VPN & password)
-/user group add name=monitor policy=read,api
+/user group add name=monitor policy=read,api,test
 /user add name=monitor group=monitor password=GANTI_PASSWORD_KUAT address=10.8.0.0/24
 /ip service set api disabled=no address=10.8.0.0/24
 /ip service set api-ssl disabled=yes
@@ -411,6 +422,10 @@ async function pageSettings() {
     ${fld('repeat_minutes', 'Ulangi alert aktif tiap (menit)', '0 = tidak diulang')}
     <div style="display:grid;gap:8px;align-content:start"><label class="chk"><input type="checkbox" name="notify_recovery" ${s.notify_recovery ? 'checked' : ''}> Kirim notifikasi saat pulih</label><label class="chk"><input type="checkbox" name="notify_reboot" ${s.notify_reboot ? 'checked' : ''}> Kirim notifikasi saat router reboot</label></div>
   </div></section></div>
+  <section class="panel"><header><h2>Network Latency</h2></header><div class="pad" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+    <div style="display:grid;gap:8px;align-content:start"><label class="chk"><input type="checkbox" name="latency_enabled" ${s.latency_enabled ? 'checked' : ''}> Aktifkan ping dari router</label><label class="chk"><input type="checkbox" name="latency_gateway" ${s.latency_gateway ? 'checked' : ''}> Ikut ping gateway router</label></div>
+    ${fld('latency_interval', 'Interval (detik)', 'Minimal 20')}${fld('latency_warn', 'Oranye di atas (ms)')}${fld('latency_bad', 'Merah di atas (ms)')}${fld('latency_retention_days', 'Simpan riwayat (hari)')}
+    <label style="grid-column:1/-1">Target ping<input name="latency_targets" value="${esc(s.latency_targets)}" class="mono"><span class="hint">Format <span class="mono">Nama:host</span>, pisahkan koma. Mobile Legends &amp; PUBG memakai domain situs resminya; ganti dengan IP/host server game yang Anda pakai bila perlu.</span></label></div></section>
   <section class="panel"><header><h2>VPN (user baru &amp; port-forward)</h2></header><div class="pad" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
     ${fld('vpn_ip_start', 'IP statis mulai (oktet terakhir)')}${fld('vpn_ip_end', 'IP statis sampai')}${fld('vpn_nat_port_min', 'Port publik minimum')}${fld('vpn_nat_port_max', 'Port publik maksimum')}
     <label>Layanan di-forward<input name="vpn_services" value="${esc(s.vpn_services)}" class="mono"><span class="hint">Format Label:port, pisahkan koma</span></label>
@@ -498,7 +513,7 @@ async function pageVpn() {
   if (!servers.find(s => s.id === vpnSid)) vpnSid = servers[0].id;
   $('#main').innerHTML = `<div class="page-head"><div><h1>VPN</h1><div class="sub">User L2TP, port-forward otomatis, dan script client.</div></div>
     <div class="row"><select id="vSel">${servers.map(s => `<option value="${s.id}" ${s.id === vpnSid ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
-    <button class="btn" id="vEdit">Server</button><button class="btn" id="vAddSrv">+ Server</button><button class="btn primary" id="vAddUser">Tambah user</button></div></div>
+    <button class="btn" id="vDiag">Diagnosa</button><button class="btn" id="vEdit">Server</button><button class="btn" id="vAddSrv">+ Server</button><button class="btn primary" id="vAddUser">Tambah user</button></div></div>
     <div id="vSum" class="kpis"></div><div class="filters"><input id="vQ" type="search" placeholder="Cari user / IP"></div>
     <section class="panel"><div class="tbl-wrap"><table class="tbl" id="vT"><tbody><tr><td class="empty">Memuat dari router…</td></tr></tbody></table></div></section>`;
   let data = null;
@@ -527,10 +542,98 @@ async function pageVpn() {
   };
   $('#vSel').onchange = e => { vpnSid = +e.target.value; $('#vT').innerHTML = '<tbody><tr><td class="empty">Memuat…</td></tr></tbody>'; load(); };
   $('#vQ').oninput = () => data && draw();
+  $('#vDiag').onclick = () => openDiag(`/vpn/servers/${vpnSid}/diag`, servers.find(s => s.id === vpnSid).name);
   $('#vEdit').onclick = () => openVpnServerForm(servers.find(s => s.id === vpnSid), route);
   $('#vAddSrv').onclick = () => openVpnServerForm(null, route);
   $('#vAddUser').onclick = () => data ? openVpnUserForm(vpnSid, data.profiles, data.server.profile, load) : toast('Tunggu data server termuat');
   await load(); refresh = load;
+}
+
+/* ---------- network latency (ala WiFiman) ---------- */
+const latColor = (ms, loss, w, b) => ms == null ? (loss >= 100 ? 'var(--bad)' : 'var(--tx2)') : ms >= b ? 'var(--bad)' : ms >= w ? 'var(--warn)' : 'var(--ok)';
+const LAT_BRAND = { 'google': ['#4285f4', 'G'], 'youtube': ['#ff0033', '▶'], 'mobile legends': ['#233b8f', 'ML'], 'pubg mobile': ['#e8a317', 'P'], 'pubg': ['#e8a317', 'P'],
+  'instagram': ['#d6249f', 'IG'], 'facebook': ['#1877f2', 'f'], 'x': ['#000', '𝕏'], 'tiktok': ['#111', '♪'], 'whatsapp': ['#25d366', 'W'], 'free fire': ['#f26b21', 'FF'] };
+function latIcon(name) {
+  if (name === 'Gateway') return '<span class="lat-ic" style="background:var(--raise);color:var(--tx2)"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2 12h16v5H2zM5 14.5h.01M8 14.5h.01M6 12V8M14 12V8M3.5 6a9 9 0 0 1 13 0"/></svg></span>';
+  const b = LAT_BRAND[name.toLowerCase()] || ['#566470', name.slice(0, 1).toUpperCase()];
+  return `<span class="lat-ic" style="background:${b[0]}">${esc(b[1])}</span>`;
+}
+function latSpark(t, v, color, bucket) {
+  const W = 150, H = 34, pts = t.map((x, i) => [x, v[i]]).filter(p => p[1] != null);
+  if (pts.length < 2) return `<svg class="lat-sp" viewBox="0 0 ${W} ${H}"></svg>`;
+  const t0 = t[0], t1 = t[t.length - 1] || t0 + 1, mx = Math.max(...pts.map(p => p[1]), 1), mn = Math.min(...pts.map(p => p[1]));
+  const sp = Math.max(mx - mn, mx * 0.25, 1), lo = Math.max(0, mn - sp * 0.15);
+  let d = '', prev = null;
+  pts.forEach(([x, y]) => { const px = ((x - t0) / Math.max(1, t1 - t0) * W).toFixed(1), py = (H - 3 - (y - lo) / (mx - lo || 1) * (H - 6)).toFixed(1); d += (prev !== null && x - prev <= bucket * 2.5 ? 'L' : 'M') + px + ',' + py; prev = x; });
+  return `<svg class="lat-sp" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function latRows(j) {
+  return j.targets.map(t => {
+    const col = latColor(t.ms, t.loss, j.warn, j.bad);
+    const val = !t.fresh ? '<span class="dim">–</span>' : t.ms == null ? '<span style="color:var(--bad)">timeout</span>' : `${num(t.ms, t.ms < 10 ? 1 : 0)}<small> ms</small>`;
+    return `<div class="lat-row" title="rata-rata ${num(t.avg, 0)} ms · min ${num(t.min, 0)} · maks ${num(t.max, 0)}">${latIcon(t.name)}<div class="lat-n"><b>${esc(t.name)}</b><span class="mono dim">${esc(t.ip || t.host || '–')}</span></div>
+      ${latSpark(t.t, t.v, 'var(--tx2)', j.bucket)}<div class="lat-v" style="color:${col}">${val}${t.fresh && t.loss > 0 && t.loss < 100 ? `<div class="lat-loss">loss ${num(t.loss, 0)}%</div>` : ''}</div></div>`;
+  }).join('');
+}
+async function pageLatency() {
+  $('#main').innerHTML = `<div class="page-head"><div><h1>Network Latency</h1><div class="sub">Ping dari tiap router ke internet &amp; gateway-nya — kualitas koneksi di setiap lokasi.</div></div><div class="hint" id="lHint"></div></div>
+  <section class="panel"><div class="tbl-wrap"><table class="tbl lat-tbl" id="lT"></table></div></section>`;
+  const draw = async () => {
+    const j = await api('/latency/overview');
+    $('#lHint').textContent = j.enabled ? `Hijau < ${j.warn} ms · oranye < ${j.bad} ms · merah di atasnya` : 'Pemantauan latency dimatikan (Pengaturan)';
+    $('#lT').innerHTML = `<thead><tr><th>Router</th>${j.targets.map(t => `<th class="r">${esc(t)}</th>`).join('')}</tr></thead><tbody>${j.routers.filter(r => r.enabled).map(r => `<tr><td><a href="#/router/${r.id}"><b>${esc(r.name)}</b></a>${r.group_name ? `<div class="dim" style="font-size:12px">${esc(r.group_name)}</div>` : ''}${r.error ? `<div style="font-size:12px;color:var(--warn)" title="${esc(r.error)}">⚠ ${esc(r.error.slice(0, 60))}</div>` : ''}</td>
+      ${j.targets.map(t => { const c = r.cells[t]; if (!r.online) return '<td class="r dim">–</td>'; if (!c) return '<td class="r dim">–</td>'; return `<td class="r mono" style="color:${latColor(c.ms, c.loss, j.warn, j.bad)};font-weight:600">${c.ms == null ? 'timeout' : num(c.ms, c.ms < 10 ? 1 : 0)}</td>`; }).join('')}</tr>`).join('') || `<tr><td colspan="${j.targets.length + 1}" class="empty">Belum ada router.</td></tr>`}</tbody>`;
+  };
+  await draw(); refresh = draw;
+}
+
+/* ---------- diagnosa: ping / traceroute / log ---------- */
+function openDiag(base, title) {
+  let tab = 'ping';
+  openModal(`<div class="sheet" style="max-width:820px"><header><h2>Diagnosa · ${esc(title)}</h2><button class="btn ghost sm" onclick="closeModal()">✕</button></header>
+  <div class="pad"><div class="seg" id="dgTabs" style="margin-bottom:12px"><button data-t="ping" class="on">Ping</button><button data-t="traceroute">Traceroute</button><button data-t="log">Log router</button></div>
+  <div id="dgBody"></div></div></div>`);
+  const body = $('#dgBody');
+  const spin = t => `<div class="hint" style="margin-top:10px">${t}</div>`;
+  const target = (extra) => `<form id="dgF" class="row" style="gap:8px;flex-wrap:wrap;align-items:end"><label style="flex:1;min-width:200px">Alamat tujuan<input name="addr" class="mono" placeholder="8.8.8.8 atau google.com" value="${esc(S.dgAddr || '')}" required autocomplete="off"></label>${extra}<button class="btn primary" type="submit">Jalankan</button></form>
+    <div style="margin-top:8px">${['8.8.8.8', '1.1.1.1', 'google.com'].map(a => `<span class="chip" data-a="${a}">${a}</span>`).join('')}</div><div id="dgOut" style="margin-top:12px"></div>`;
+  const chips = () => $$('[data-a]', body).forEach(c => c.onclick = () => { body.querySelector('[name=addr]').value = c.dataset.a; });
+  const err = (out, x) => { out.innerHTML = `<div class="testres bad">${esc(x.message)}</div>`; };
+  const view = () => {
+    $$('#dgTabs button').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
+    if (tab === 'log') return viewLog();
+    const isPing = tab === 'ping';
+    body.innerHTML = target(isPing ? '<label style="width:90px">Jumlah<input name="count" type="number" min="1" max="10" value="4"></label>' : '');
+    chips();
+    $('#dgF').onsubmit = async ev => {
+      ev.preventDefault(); const f = ev.target, out = $('#dgOut'), btn = f.querySelector('.primary'); S.dgAddr = f.addr.value.trim();
+      btn.disabled = true; out.innerHTML = spin(isPing ? 'Mengirim ping dari router…' : 'Melacak rute dari router (bisa sampai ±30 detik)…');
+      try {
+        const j = await api(base + '/' + tab, { method: 'POST', body: isPing ? { address: S.dgAddr, count: +f.count.value || 4 } : { address: S.dgAddr } });
+        out.innerHTML = isPing ? `<div class="stat-line" style="margin-bottom:8px"><span>terkirim <b>${j.sent}</b></span><span>diterima <b>${j.received}</b></span><span>loss <b style="color:${j.loss ? 'var(--bad)' : 'var(--ok)'}">${num(j.loss)}%</b></span><span>min/avg/max <b>${num(j.min, 1)} / ${num(j.avg, 1)} / ${num(j.max, 1)} ms</b></span></div>
+          <table class="tbl"><thead><tr><th>#</th><th>Dari</th><th>Waktu</th><th>TTL</th></tr></thead><tbody>${j.replies.map(r => `<tr><td>${r.seq}</td><td class="mono">${esc(r.host)}</td><td>${r.ok ? num(r.ms, 1) + ' ms' : `<span style="color:var(--bad)">${esc(r.status || 'timeout')}</span>`}</td><td>${esc(r.ttl || '–')}</td></tr>`).join('')}</tbody></table>`
+          : `<div class="${j.reached ? '' : 'hint'}" style="margin-bottom:8px">${j.reached ? '<span class="pill ok">Tujuan tercapai</span>' : 'Tujuan belum tercapai dalam batas hop (mungkin ICMP diblokir di ujung).'}</div>
+          <table class="tbl"><thead><tr><th>Hop</th><th>Alamat</th><th>Loss</th><th>Last</th><th>Avg</th><th>Best</th><th>Worst</th></tr></thead><tbody>${j.hops.map(h => `<tr><td>${h.hop}</td><td class="mono">${esc(h.address)}</td><td>${h.loss == null ? '–' : num(h.loss) + '%'}</td><td>${h.last == null ? '–' : num(h.last, 1)}</td><td>${h.avg == null ? '–' : num(h.avg, 1)}</td><td>${h.best == null ? '–' : num(h.best, 1)}</td><td>${h.worst == null ? '–' : num(h.worst, 1)}</td></tr>`).join('')}</tbody></table>`;
+      } catch (x) { err(out, x); } finally { btn.disabled = false; }
+    };
+  };
+  const viewLog = () => {
+    body.innerHTML = `<div class="row" style="gap:8px;flex-wrap:wrap;align-items:end"><label style="width:170px">Topik<select id="lgT"><option value="">Semua</option></select></label><label style="flex:1;min-width:160px">Cari<input id="lgQ" type="search" placeholder="kata di pesan log"></label><label style="width:90px">Baris<select id="lgN"><option>100</option><option selected>200</option><option>500</option></select></label><button class="btn" id="lgR">Muat ulang</button></div><div id="dgOut" style="margin-top:12px"></div>`;
+    let loaded = false;
+    const load = async () => {
+      const out = $('#dgOut'); out.innerHTML = spin('Mengambil log dari router…');
+      try {
+        const j = await api(`${base}/log?limit=${$('#lgN').value}&topic=${encodeURIComponent($('#lgT').value)}&search=${encodeURIComponent($('#lgQ').value)}`);
+        if (!loaded) { loaded = true; const sel = $('#lgT'); j.topics.forEach(t => { const o = document.createElement('option'); o.textContent = t; sel.append(o); }); }
+        const cls = t => /error|critical/.test(t) ? 'var(--bad)' : /warning/.test(t) ? 'var(--warn)' : '';
+        out.innerHTML = `<div class="hint" style="margin-bottom:6px">${j.lines.length} dari ${j.total} baris cocok · terbaru di atas</div><div class="tbl-wrap" style="max-height:420px;overflow:auto"><table class="tbl"><tbody>${j.lines.map(l => `<tr><td class="mono dim" style="white-space:nowrap">${esc(l.time)}</td><td class="dim" style="font-size:12px">${esc(l.topics)}</td><td style="color:${cls(l.topics)}">${esc(l.message)}</td></tr>`).join('') || '<tr><td class="empty">Tidak ada baris.</td></tr>'}</tbody></table></div>`;
+      } catch (x) { err(out, x); }
+    };
+    $('#lgR').onclick = load; $('#lgT').onchange = load; $('#lgN').onchange = load; $('#lgQ').onkeydown = e => { if (e.key === 'Enter') load(); };
+    load();
+  };
+  $$('#dgTabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; view(); });
+  view();
 }
 
 /* ---------- boot ---------- */

@@ -1,11 +1,11 @@
 services:
   monitor:
     build: .
-    container_name: mikrotik-monitoring
+    container_name: mikrotik-monitor
     restart: unless-stopped
     env_file: .env
     ports:
-      - "3100:8080"      # ganti ke "127.0.0.1:8080:8080" bila dipasang di belakang reverse proxy
+      - "8080:8080"      # ganti ke "127.0.0.1:8080:8080" bila dipasang di belakang reverse proxy
     volumes:
       - ./data:/data
     # Penting: container harus bisa menjangkau IP VPN router.

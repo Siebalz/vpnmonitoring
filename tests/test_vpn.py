@@ -62,6 +62,57 @@ with TestClient(main.app) as c:
     c.put("/api/settings", json={"vpn_services": "SSH:22"})
     r3 = c.post(f"/api/vpn/servers/{sid}/users", json={"username": "cici", "monitor": False}).json()
     assert [a["name"] for a in r3["access"]] == ["SSH"]
+    # --- diagnosa pada server VPN ---
+    base = f"/api/vpn/servers/{sid}/diag"
+    c.put(f"/api/vpn/servers/{sid}", json={"name": "S1", "host": "127.0.0.1", "port": fr.port, "username": "x", "password": "pw", "vpn_subnet": "11.11.11."})
+    p = c.post(base + "/ping", json={"address": "8.8.8.8", "count": 3}).json()
+    assert p["sent"] == 3 and p["received"] == 3 and p["avg"] == 11 and p["loss"] == 0 and len(p["replies"]) == 3, p
+    t = c.post(base + "/traceroute", json={"address": "8.8.8.8"}).json()
+    assert [h["address"] for h in t["hops"]] == ["10.0.0.1", "*", "8.8.8.8"] and t["reached"], t
+    lg = c.get(base + "/log?topic=l2tp").json()
+    assert lg["total"] == 1 and lg["lines"][0]["message"] == "budi logged in", lg
+    assert c.get(base + "/log?search=BOOM").json()["lines"][0]["time"] == "10:01:00"
+    assert c.get(base + "/log?limit=2").json()["lines"][0]["message"] == "boom"       # terbaru dulu
+    for bad in ("8.8.8.8; rm", "a b", "", "-x"):
+        assert c.post(base + "/ping", json={"address": bad}).status_code == 400, bad
+    fr.deny = True
+    e = c.post(base + "/ping", json={"address": "1.1.1.1"})
+    assert e.status_code == 400 and "policy=read,api,test" in e.json()["detail"], e.text
+    fr.deny = False
+    # diagnosa pada router monitoring (host non-demo)
+    rid2 = main.db.ex("""INSERT INTO routers(name,host,port,username,password_enc,created_at) VALUES('R','127.0.0.1',?,'x',?,1)""",
+                      (fr.port, main.enc("pw"))).lastrowid
+    assert c.post(f"/api/routers/{rid2}/diag/ping", json={"address": "1.1.1.1"}).json()["received"] == 4
+    assert c.post("/api/routers/99999/diag/ping", json={"address": "1.1.1.1"}).status_code == 404
+    # --- network latency ---
+    from app import latency
+    s = main.db.get_settings()
+    assert [n for n, _ in latency.targets_for(s)] == ["Google", "YouTube", "Mobile Legends", "PUBG Mobile", "Instagram", "Facebook", "Gateway"]
+    assert latency.parse_targets("A:ok.com, bad entry, B:x y.com, C:1.2.3.4") == [("A", "ok.com"), ("C", "1.2.3.4")]
+    main.db.ex("UPDATE routers SET enabled=1 WHERE id=?", (rid2,))
+    c.put("/api/settings", json={"latency_targets": "Google:google.com,PUBG Mobile:pubgmobile.com,Rusak:nama.invalid"})
+    r2row = main.db.q1("SELECT * FROM routers WHERE id=?", (rid2,))
+    assert latency.probe_router(r2row) == 4
+    v = c.get(f"/api/routers/{rid2}/latency?range=1h").json()
+    by = {t["name"]: t for t in v["targets"]}
+    assert by["Google"]["ms"] == 11 and by["Google"]["ip"] == "142.250.1.1" and by["Google"]["loss"] == 0, by["Google"]
+    assert by["PUBG Mobile"]["ms"] is None and by["PUBG Mobile"]["loss"] == 100
+    assert by["Rusak"]["loss"] == 100 and by["Rusak"]["ms"] is None          # DNS gagal = 100% loss, bukan crash
+    assert by["Gateway"]["ip"] == "192.168.101.1" and by["Gateway"]["ms"] == 11 and by["Gateway"]["v"], by["Gateway"]
+    assert list(by)[-1] == "Gateway" and v["error"] == ""
+    # izin kurang -> pesan jelas, tidak ada data baru
+    fr.deny = True
+    assert c.post(f"/api/routers/{rid2}/latency/probe").json()["measured"] == 0
+    assert "policy=read,api,test" in c.get(f"/api/routers/{rid2}/latency").json()["error"]
+    fr.deny = False
+    assert c.post(f"/api/routers/{rid2}/latency/probe").json()["measured"] == 4
+    assert c.get(f"/api/routers/{rid2}/latency").json()["error"] == ""
+    ov = c.get("/api/latency/overview").json()
+    row = next(x for x in ov["routers"] if x["id"] == rid2)
+    assert ov["targets"][-1] == "Gateway" and row["cells"]["Google"]["ms"] == 11, ov
+    assert c.get("/api/routers/99999/latency").status_code == 404
+    c.put("/api/settings", json={"latency_gateway": False})
+    assert "Gateway" not in [t["name"] for t in c.get(f"/api/routers/{rid2}/latency").json()["targets"]]
     # server mati -> 502 bukan crash
     c.put(f"/api/vpn/servers/{sid}", json={"name": "S1", "host": "127.0.0.1", "port": 1, "username": "x", "vpn_subnet": "11.11.11."})
     assert c.get(f"/api/vpn/servers/{sid}/users").status_code == 502
